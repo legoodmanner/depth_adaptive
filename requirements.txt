@@ -1,0 +1,7 @@
+torchaudio
+torch
+loralib
+transformers
+librosa
+omegaconf
+wandb

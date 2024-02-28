@@ -98,6 +98,7 @@ class GTZAN():
         
     
 class GTZAN_MERT():
+    # Dataset of GTZAN that being extracted by MERT
     def __init__(self, batch_size, num_workers, root=None, **args):
         # Define: train_loader, valid_loader, test_loader, sampling_rate, processors 
 

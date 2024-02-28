@@ -1,0 +1,16 @@
+data:
+  name: GTZAN
+  # name: GTZAN
+  batch_size: 2
+  num_workers: 0
+model:
+  mlp_lr: 0.0001
+  reduction_lr: 0.00001
+  train_valid_n: 30
+  mode: laser
+  hidden_layer: -1
+  reduction_layer: 20
+ 
+  
+
+  
