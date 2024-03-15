@@ -15,38 +15,43 @@ import os, datetime
 
 def train_entire(conf):
     # model init
-    model = AutoModel.from_pretrained("m-a-p/MERT-v1-330M", trust_remote_code=True)
+    model = AutoModel.from_pretrained("m-a-p/MERT-v1-95M", trust_remote_code=True)
     parma_edit(model, mode=conf.mode, reduction_layer=conf.reduction_layer,)
     model = model.to(device)
     mlp = Downstream_MLP(n_class=10).to(device)
     # optimizer
     optimizer_mlp = Adam(params=mlp.parameters(), lr=conf.mlp_lr)
     scheduler_mlp = ReduceLROnPlateau(optimizer_mlp, 'min', factor=0.3, patience=80)
-    if conf.mode == 'lora':
+    if conf.adaption == 'lora':
         optimizer_reduction = Adam(params=model.parameters(), lr=conf.reduction_lr)
         scheduler_reduction = ReduceLROnPlateau(optimizer_reduction, 'min', factor=0.3, patience=80) 
     min_val = 1000
-
+    scaler = torch.cuda.amp.GradScaler()
     for n_epoch in range(1000):
-        model.train()
+        model.eval()
         mlp.train()
         for batch in tqdm(train_loader):
+            # with torch.autocast(device_type='cuda', dtype=torch.float16):
             input_values, attn_mask, label, fn = batch
             input_values, attn_mask, label = input_values.to(device), attn_mask.to(device), label.to(device)
+
             input_values = input_values.squeeze(1)
             outputs = model(input_values= input_values, attention_mask=attn_mask, output_hidden_states=True)
-            pred_y = mlp(outputs.hidden_states[conf.hidden_layer].mean(1))
+            pred_y = mlp(outputs.hidden_states[conf.hidden_layer].mean(1).detach())
             loss = lossfn(pred_y, label)
             loss.backward()
+            # scaler.scale(loss).backward()
             optimizer_mlp.step()
-            if conf.mode == 'lora':
+            # scaler.step(optimizer_mlp)
+            if conf.adaption == 'lora':
                 optimizer_reduction.step()
+                # scaler.step(optimizer_reduction)
             wandb.log({'train_loss': loss})
+            # scaler.update()
         print(f'Epoch {n_epoch} | train_loss: {loss}')
 
 
         if n_epoch % conf.train_valid_n == 0:
-            model.eval()
             mlp.eval()
             for batch in tqdm(valid_loader):
                 input_values, attn_mask, label, fn = batch
@@ -58,17 +63,17 @@ def train_entire(conf):
                     loss = lossfn(pred_y, label)
             if min_val > loss:
                 min_val = loss
-                torch.save(mlp.state_dict(),)
+                torch.save(mlp.state_dict(),'mlp')
+                torch.save(model.state_dict(), 'fine_tuned_Mert')
             scheduler_mlp.step(loss)
-            if conf.mode == 'lora':
+            if conf.adaption == 'lora':
                 scheduler_reduction.step(loss)
             print(f'Epoch {n_epoch} | valid_loss: {loss}')
             wandb.log({'valid_loss': loss})
 
-def train_pretrained(layer):
-    
+def train_pretrained(configs):
     mlp = Downstream_MLP(n_class=10).to(device)
-    optimizer = Adam(params=mlp.parameters(), lr=configs.model.learning_rate)
+    optimizer = Adam(params=mlp.parameters(), lr=configs.mlp_lr)
     scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.3, patience=80)    
     min_val = 1000
     for n_epoch in range(1000):
@@ -77,29 +82,42 @@ def train_pretrained(layer):
         mlp.zero_grad()
         for idx, batch in enumerate(tqdm(train_loader)):
             h, label, = batch['hidden_states'], batch['label']
-            pred_y = mlp(h[:,layer].squeeze(1).to(device))
+            pred_y = mlp(h[:,configs.hidden_layer].squeeze(1).to(device))
             loss = lossfn(pred_y, label.squeeze(1).to(device))
             loss.backward()
-            tloss += loss.item()
             optimizer.step()
+            tloss += loss.item() * pred_y.shape[0]
             wandb.log({'train_loss': loss})
-        print(f'Epoch {n_epoch} | train_loss: {tloss/idx}')
+        print(f'Epoch {n_epoch} | train_loss: {tloss/500}')
 
 
-        if n_epoch % conf.train_valid_n == 0:
+        if n_epoch % configs.train_valid_n == 0:
             vloss = 0
             mlp.eval()
             for idx, batch in enumerate(tqdm(valid_loader)):
                 h, label, = batch['hidden_states'], batch['label']
-                pred_y = mlp(h[:,layer].squeeze(1).to(device))
+                pred_y = mlp(h[:,configs.hidden_layer].squeeze(1).to(device))
                 loss = lossfn(pred_y, label.squeeze(1).to(device))
-                vloss += loss.item()
-                wandb.log({'valid_loss': loss})
-            if min_val > loss:
-                min_val = loss
-                torch.save(mlp.state_dict(), f'param_l{layer}')
-            scheduler.step(loss)
-            print(f'Epoch {n_epoch} | valid_loss: {vloss/idx}')
+                vloss += loss.item() * pred_y.shape[0]
+            wandb.log({'valid_loss': vloss / 250})
+            if min_val > vloss / 250:
+                min_val = vloss / 250
+                torch.save(mlp.state_dict(), f'{logpath}/params/params')
+            scheduler.step(vloss / 250)
+            print(f'Epoch {n_epoch} | valid_loss: {vloss/250}')
+    
+    # test
+    print('Testing....')
+    mlp.eval()
+    with torch.no_grad():
+        acc = 0
+        for idx, batch in enumerate(tqdm(test_loader)):
+            h, label, = batch['hidden_states'], batch['label']
+            pred_y = mlp(h[:,configs.hidden_layer].squeeze(1).to(device))
+            acc += (torch.argmax(pred_y, -1) == label.squeeze(1).to(device)).sum().item()
+        acc /= 250
+        wandb.log({'test acc': acc})
+    print(f'accuracy: {acc*100}%')
     wandb.finish()
 
 if __name__ == '__main__':
@@ -122,7 +140,7 @@ if __name__ == '__main__':
     train_loader, valid_loader, test_loader = dataset.train_loader, dataset.valid_loader, dataset.test_loader
 
     # build logs directory
-    name = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    name = datetime.datetime.now().strftime("%m%d%H%M")
     logpath = f'logs/{name}'
     os.makedirs(logpath, exist_ok=True)
     for child in ['params', 'wandb', 'configs']:
@@ -141,10 +159,11 @@ if __name__ == '__main__':
     device = torch.device('cuda')
     lossfn = nn.CrossEntropyLoss()
 
-    train_entire(configs.model)
+    if configs.meta.train_mode == 'train_pretrained':
+        train_pretrained(configs.model)
+    elif configs.meta.train_mode == 'train_with_model':
+        train_entire(configs.model)
+
 
         
     
-
-
-

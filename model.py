@@ -38,24 +38,31 @@ def do_low_rank(weight, k, debug=False, niter=2):
 
     return weight_approx
 
-def parma_edit(model, mode, reduction_layer=20, **kwargs):
+def parma_edit(model, adaption=None, adpt_layers=None, adpt_confs=None, **kwargs):
     # Trun off all the gradient computation by defualt
+    if isinstance(adpt_layers, int): adpt_layers = [adpt_layers]
     for param in model.parameters():
         param.requires_grad = False
 
-    if mode == 'laser':
-        model.encoder.layers[reduction_layer].feed_forward.intermediate_dense.weight \
-            = do_low_rank(model.encoder.layers[reduction_layer].feed_forward.intermediate_dense.wieght)
-    elif mode == 'lora':
-        orig_dense = model.encoder.layers[reduction_layer].feed_forward.intermediate_dense
-        loralayer = LoraLinear(
-            orig_dense.in_features,
-            orig_dense.out_features,
-            r = 512,
-        )
-        loralayer.weight, loralayer.bias = deepcopy(orig_dense.weight), deepcopy(loralayer.bias)
-        model.encoder.layers[reduction_layer].feed_forward.intermediate_dense = loralayer
-        
+    if adaption == 'laser' and adpt_layers is not None:
+        print('Do the Laser reduction....')
+        for layer in adpt_layers :
+            model.encoder.layers[layer].feed_forward.intermediate_dense.weight \
+                = do_low_rank(model.encoder.layers[layer].feed_forward.intermediate_dense.weight, k=adpt_confs['k'])
+            
+    elif adaption == 'lora':
+        print('Do the Lora reduction....')
+        for i in range(len(model.encoder.layers)):
+            orig_dense = model.encoder.layers[i].feed_forward.intermediate_dense
+            loralayer = LoraLinear(
+                orig_dense.in_features,
+                orig_dense.out_features,
+                r = 512,
+            )
+            loralayer.weight, loralayer.bias = deepcopy(orig_dense.weight), deepcopy(loralayer.bias)
+            model.encoder.layers[i].feed_forward.intermediate_dense = loralayer
+    elif adaption is None:
+        pass
 
 if __name__ == '__main__':
     from transformers import AutoModel

@@ -1,15 +1,19 @@
+meta:
+  train_mode: 'train_pretrained'
 data:
-  name: GTZAN
-  # name: GTZAN
-  batch_size: 2
+  name: GTZAN_MERT
+  batch_size: 64
   num_workers: 0
+  adaption: null
+  adpt_layers: 12
+  adpt_confs:
+    k: 0.1
 model:
   mlp_lr: 0.0001
-  reduction_lr: 0.00001
-  train_valid_n: 30
-  mode: laser
+  reduction_lr: 0.0001
+  train_valid_n: 10
+  adaption: null
   hidden_layer: -1
-  reduction_layer: 20
  
   
 
