@@ -3,9 +3,10 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torch
 import os
+from os.path import join as pjoin
 import librosa
 from transformers import Wav2Vec2FeatureExtractor
-import pickle
+import pickle, importlib
 import random
 
 class AudioDataset(Dataset):
@@ -31,7 +32,23 @@ class AudioDataset(Dataset):
     def __len__(self):
         return len(self.fns)
     
-
+class StemsAudioDataset(AudioDataset):
+    def __init__(self, fns=None, labels=None, seg_len=None):
+        super().__init__(fns, labels, seg_len)
+        # fns should be indivisual root of 4 stems directory
+    def __getitem__(self, idx):
+        wavs = {
+            'label': self.labels[idx],
+            'filename': self.fns[idx]
+        }
+        for stem in ['vocals', 'drums', 'bass', 'other']:
+            wav = librosa.load(pjoin(self.fns[idx].strip('.wav'),f'{stem}.wav'))[0]
+            wav = librosa.resample(wav, orig_sr=22050, target_sr=24000)[:24000*28]
+            inputs = self.seqproc(wav, sampling_rate=24000, return_tensors='np')
+            wavs[stem] = inputs['input_values']
+        wavs['attention_mask'] = inputs['attention_mask']
+        return wavs
+    
 class FromPKLDataset(Dataset):
     def __init__(self, fns=None):
         super().__init__()
@@ -48,7 +65,7 @@ class FromPKLDataset(Dataset):
 # ====================
        
 class GTZAN():
-    def __init__(self, batch_size, num_workers, root=None, seg_len=None, **args):
+    def __init__(self, batch_size, num_workers, root=None, seg_len=None, datasetClass='AudioDataset', **args):
         # Define: train_loader, valid_loader, test_loader, sampling_rate, processors 
 
         super().__init__()
@@ -70,15 +87,15 @@ class GTZAN():
         #     T.Resample(self.sampling_rate, 24000), # resampler 
         #     Wav2Vec2FeatureExtractor.from_pretrained("m-a-p/MERT-v1-330M",trust_remote_code=True), # wav2vec preproc
         # ]
-        random.seed(4900)
+        dataset = getattr(importlib.import_module('dataset'), datasetClass)
         with open(f'configs/GTZAN_train.txt', 'r') as f:
             train_fns = f.readlines()
         train_labels = [ self.labelID[fn.split('/')[0]] for fn in train_fns]
         train_fns = [os.path.join(self.root, fn.split('/')[1].strip('\n')) for fn in train_fns]
         self.train_loader = DataLoader(
-            AudioDataset(train_fns, labels=train_labels, seg_len=seg_len),
+            dataset(train_fns, labels=train_labels, seg_len=seg_len),
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=num_workers,
         )
         with open(f'configs/GTZAN_valid.txt', 'r') as f:
@@ -86,7 +103,7 @@ class GTZAN():
         valid_labels = [ self.labelID[fn.split('/')[0]] for fn in valid_fns]
         valid_fns = [os.path.join(self.root, fn.split('/')[1].strip('\n')) for fn in valid_fns]
         self.valid_loader = DataLoader(
-            AudioDataset(valid_fns, labels=valid_labels, seg_len=seg_len),
+            dataset(valid_fns, labels=valid_labels, seg_len=seg_len),
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -97,17 +114,16 @@ class GTZAN():
         test_labels = [ self.labelID[fn.split('/')[0]] for fn in test_fns]
         test_fns = [os.path.join(self.root, fn.split('/')[1].strip('\n')) for fn in test_fns]
         self.test_loader = DataLoader(
-            AudioDataset(test_fns, labels=test_labels,  seg_len=seg_len),
+            dataset(test_fns, labels=test_labels,  seg_len=seg_len),
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
-        )
-
+        )    
         
     
 class GTZAN_MERT():
     # Dataset of GTZAN that being extracted by MERT
-    def __init__(self, batch_size, num_workers, adaption=None, adpt_layers=None, adpt_confs=None, root=None, **args):
+    def __init__(self, batch_size, num_workers, adaption=None, adpt_layers=None, adpt_confs=None, root=None, separated=False, **args):
         # Define: train_loader, valid_loader, test_loader, sampling_rate, processors 
         
         super().__init__()
@@ -123,6 +139,9 @@ class GTZAN_MERT():
                 print('Extracting features....')
                 os.makedirs(self.root, exist_ok=False)
                 feature_extraction(self.root, adaption, adpt_layers, adpt_confs)
+        if separated:
+            self.root = self.root + '_4stems'
+        random.seed(4900)
 
         self.sampling_rate = 22050
         with open(f'configs/GTZAN_train.txt', 'r') as f:
@@ -131,7 +150,7 @@ class GTZAN_MERT():
         self.train_loader = DataLoader(
             FromPKLDataset(train_fns),
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=num_workers,
         )
         with open(f'configs/GTZAN_valid.txt', 'r') as f:
@@ -156,7 +175,7 @@ class GTZAN_MERT():
         
 
 
-def feature_extraction(root, adaption, adpt_layers, adpt_confs):
+def feature_extraction(outdir, adaption, adpt_layers, adpt_confs, indir=None, datasetClass=AudioDataset):
     import importlib
     from transformers import AutoModel
     from model import parma_edit
@@ -179,6 +198,8 @@ def feature_extraction(root, adaption, adpt_layers, adpt_confs):
             'name': 'GTZAN',
             'batch_size': 1,
             'num_workers': 0,
+            'root': indir,
+            'datasetClass': datasetClass,
         }
     )
 
@@ -187,7 +208,10 @@ def feature_extraction(root, adaption, adpt_layers, adpt_confs):
     # make sure the sample_rate aligned
     for loader in [train_loader, valid_loader, test_loader]:
         for batch in tqdm(loader):
-            input_values, attn_mask, label, fns = batch
+            if isinstance(batch, list):
+                input_values, attn_mask, label, fns = batch
+            elif isinstance(batch, dict):
+                input_values, attn_mask, label, fns = batch['wavs'], batch['attention_mask'], batch['label'], batch['filename']
             input_values, attn_mask, label = input_values.to(device), attn_mask.to(device), label.to(device)
             with torch.no_grad():
                 input_values = input_values.squeeze(1)
@@ -197,8 +221,9 @@ def feature_extraction(root, adaption, adpt_layers, adpt_confs):
                 outputs['filename'] = fns[0].split('/')[-1]
                 outputs['label'] = label.detach().cpu().numpy()
                 
-                with open(f"{root}/{outputs['filename'].strip('.wav')}.pkl", 'wb') as f:
+                with open(f"{outdir}/{outputs['filename'].strip('.wav')}.pkl", 'wb') as f:
                     pickle.dump(dict(outputs), f)
     
     del model
     torch.cuda.empty_cache()
+

@@ -7,6 +7,71 @@ import loralib as lora
 from loralib.layers import Linear as LoraLinear
 from copy import deepcopy
 
+def initialize_weights(model):
+    for m in model.modules():
+        if isinstance(m, (nn.Linear, nn.Conv2d)):  # Check for specific layer types
+            torch.nn.init.xavier_normal_(m.weight,)  # Set mean and std
+
+class StemAttention(nn.Module):
+    def __init__(self, d_model, dropout=0.1):
+        super(StemAttention, self).__init__()
+        self.d_model = d_model
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Linear projections for Q, K, and V
+        self.D_q = nn.Linear(d_model, d_model//8)
+        self.D_k = nn.Linear(d_model, d_model//8)
+        self.D_v = nn.Linear(d_model, d_model)
+
+        self.O_q = nn.Linear(d_model, d_model//8)
+        self.O_k = nn.Linear(d_model, d_model//8)
+        self.O_v = nn.Linear(d_model, d_model)
+
+        self.V_q = nn.Linear(d_model, d_model//8)
+        self.V_k = nn.Linear(d_model, d_model//8)
+        self.V_v = nn.Linear(d_model, d_model)
+
+        self.B_q = nn.Linear(d_model, d_model//8)
+        self.B_k = nn.Linear(d_model, d_model//8)
+        self.B_v = nn.Linear(d_model, d_model)
+
+    def forward(self, inp):
+        # Project input for queries, keys, and values
+        Dq = self.D_q(inp['drums'])
+        Dk = self.D_k(inp['drums'])
+        Dv = self.D_v(inp['drums'])
+
+        Vq = self.V_q(inp['vocals'])
+        Vk = self.V_k(inp['vocals'])
+        Vv = self.V_v(inp['vocals'])
+
+        Bq = self.V_q(inp['bass'])
+        Bk = self.V_k(inp['bass'])
+        Bv = self.V_v(inp['bass'])
+
+        Oq = self.V_q(inp['other'])
+        Ok = self.V_k(inp['other'])
+        Ov = self.V_v(inp['other'])
+
+
+        
+        q = torch.cat((Dq, Vq, Bq, Oq), dim=-2)
+        v = torch.cat((Dv, Vv, Bv, Ov), dim=-2)
+        k = torch.cat((Dk, Vk, Bk, Ok), dim=-2)
+        
+
+        # Calculate attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.d_model**0.5  # Scale by sqrt(d_model)
+        scores = self.dropout(scores)
+
+        # Apply softmax to normalize attention weights
+        attention = torch.softmax(scores, dim=-1)
+
+        # Context vector as weighted sum of values
+        output = torch.matmul(attention, v)
+
+        return output.mean(-2)
+  
 class Downstream_MLP(nn.Module):
     def __init__(self, n_class):
         super().__init__()
@@ -20,7 +85,19 @@ class Downstream_MLP(nn.Module):
         )
     def forward(self, x):
         return self.mlp(x)
+    
+class Downstream_4stemsMLP(Downstream_MLP):
+    def __init__(self, n_class) -> None:
+        super().__init__(n_class)
 
+        self.attn = StemAttention(1024)
+        initialize_weights(self.attn)
+        initialize_weights(self.mlp)
+        
+    def forward(self, x):
+        x = self.attn(x)
+        return self.mlp(x)
+    
 def do_low_rank(weight, k, debug=False, niter=2):
     assert weight.ndim == 2
     max_rank = min(weight.shape[0], weight.shape[1])

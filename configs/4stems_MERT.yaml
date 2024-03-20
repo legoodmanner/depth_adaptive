@@ -1,13 +1,13 @@
 meta:
-  train_mode: 'train_pretrained'
+  train_mode: 'train_4stems_pretrained'
 data:
   name: GTZAN_MERT
   batch_size: 64
   num_workers: 0
-  separated: False
+  separated: True
   root: '/home/lego/Database/MERT_repr/'
 model:
-  mlp_lr: 0.0001
+  mlp_lr: 0.00005
   reduction_lr: 0.0001
   train_valid_n: 10
   adaption: null

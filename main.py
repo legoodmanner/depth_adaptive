@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from omegaconf import OmegaConf
 import importlib
-from model import Downstream_MLP, parma_edit
+from model import Downstream_MLP, parma_edit, Downstream_4stemsMLP
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
@@ -76,7 +76,7 @@ def train_pretrained(configs):
     optimizer = Adam(params=mlp.parameters(), lr=configs.mlp_lr)
     scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.3, patience=80)    
     min_val = 1000
-    for n_epoch in range(1000):
+    for n_epoch in range(2000):
         tloss = 0
         mlp.train()
         mlp.zero_grad()
@@ -106,8 +106,8 @@ def train_pretrained(configs):
             scheduler.step(vloss / 250)
             print(f'Epoch {n_epoch} | valid_loss: {vloss/250}')
     
-    # test
-    print('Testing....')
+    mlp.load_state_dict(
+        torch.load(f'{logpath}/params/params'))
     mlp.eval()
     with torch.no_grad():
         acc = 0
@@ -120,11 +120,80 @@ def train_pretrained(configs):
     print(f'accuracy: {acc*100}%')
     wandb.finish()
 
+def train_4stems_pretrained(configs):
+    mlp = Downstream_4stemsMLP(n_class=10).to(device)
+    optimizer = Adam(params=mlp.parameters(), lr=configs.mlp_lr)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.3, patience=80)    
+    min_val = 1000
+    for n_epoch in range(2000):
+        tloss = 0
+        mlp.train()
+        mlp.zero_grad()
+        for idx, batch in enumerate(tqdm(train_loader)):
+            vocals, bass, other, drums, label, = batch['vocals'], batch['bass'], batch['other'], batch['drums'], batch['label']
+            inp = dict(
+                vocals=vocals[:,configs.hidden_layer].to(device),
+                bass=bass[:,configs.hidden_layer].to(device),
+                other=other[:,configs.hidden_layer].to(device),
+                drums=drums[:,configs.hidden_layer].to(device),
+            )
+            pred_y = mlp(inp)
+            loss = lossfn(pred_y, label.squeeze(1).to(device))
+            loss.backward()
+            optimizer.step()
+            tloss += loss.item() * pred_y.shape[0]
+            wandb.log({'train_loss': loss})
+        print(f'Epoch {n_epoch} | train_loss: {tloss/500}')
+
+
+        if n_epoch % configs.train_valid_n == 0:
+            vloss = 0
+            mlp.eval()
+            for idx, batch in enumerate(tqdm(valid_loader)):
+                vocals, bass, other, drums, label, = batch['vocals'], batch['bass'], batch['other'], batch['drums'], batch['label']
+                inp = dict(
+                    vocals=vocals[:,configs.hidden_layer].to(device),
+                    bass=bass[:,configs.hidden_layer].to(device),
+                    other=other[:,configs.hidden_layer].to(device),
+                    drums=drums[:,configs.hidden_layer].to(device),
+                )
+                pred_y = mlp(inp)
+                loss = lossfn(pred_y, label.squeeze(1).to(device))
+                vloss += loss.item() * pred_y.shape[0]
+            wandb.log({'valid_loss': vloss / 250})
+            if min_val > vloss / 250:
+                min_val = vloss / 250
+                torch.save(mlp.state_dict(), f'{logpath}/params/params')
+            scheduler.step(vloss / 250)
+            print(f'Epoch {n_epoch} | valid_loss: {vloss/250}')
+
+    # test
+    print('Testing....')
+    mlp.load_state_dict(
+        torch.load(f'{logpath}/params/params'))
+    mlp.eval()
+    with torch.no_grad():
+        acc = 0
+        for idx, batch in enumerate(tqdm(test_loader)):
+            vocals, bass, other, drums, label, = batch['vocals'], batch['bass'], batch['other'], batch['drums'], batch['label']
+            inp = dict(
+                vocals=vocals[:,configs.hidden_layer].to(device),
+                bass=bass[:,configs.hidden_layer].to(device),
+                other=other[:,configs.hidden_layer].to(device),
+                drums=drums[:,configs.hidden_layer].to(device),
+            )
+            pred_y = mlp(inp)
+            acc += (torch.argmax(pred_y, -1) == label.squeeze(1).to(device)).sum().item()
+        acc /= 250
+        wandb.log({'test acc': acc})
+    print(f'accuracy: {acc*100}%')
+    wandb.finish()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', '-c', type=str,)
     args = parser.parse_args()
-
+    torch.manual_seed(4900)
     def load_dataset(dconf):
         dataset = getattr(importlib.import_module('dataset'), f'{dconf.name}')(**dconf)
         return dataset
@@ -163,6 +232,8 @@ if __name__ == '__main__':
         train_pretrained(configs.model)
     elif configs.meta.train_mode == 'train_with_model':
         train_entire(configs.model)
+    elif configs.meta.train_mode == 'train_4stems_pretrained':
+        train_4stems_pretrained(configs.model)
 
 
         
